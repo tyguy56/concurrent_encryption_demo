@@ -16,6 +16,7 @@
  *      writeFull:      used to block and signal the writer thread that the output buffer has a new character from the encryption thread
  *      inFull:         used to block and signal the input counter thread that the input buffer has a new character from the reader thread (solves cold start issue)
  *      outFull:        used to block and signal the output counter thread that the output buffer has a new character from the encryption thread
+ *      reset_req_sem:  used to block the reader thread from executing until the input and output buffers are equal
  *
  * The code proceeds to create and execute the required five pthreads to work in conjunction waiting for each thread to rejoin, log counts and then destroy
  * the semaphores
@@ -39,18 +40,24 @@ char *out_buf;
 
 sem_t inMutex;
 sem_t outMutex;
-sem_t encryptFull, encryptEmpty, readEmpty, writeFull, inFull, outFull;
+sem_t encryptFull;
+sem_t encryptEmpty;
+sem_t readEmpty;
+sem_t writeFull;
+sem_t inFull;
+sem_t outFull;
+sem_t reset_req_sem;
 
 int buffer_size;
 int reader_index;
 int encrypt_index;
 
 /* Thread function prototypes */
-void *runReaderThread();        /* reader thread runner */
-void *runWriterThread();        /* writer thread runner */
-void *runEncryptionThread();    /* encryption thread runner */
-void *runInputCounterThread();  /* input counter thread runner */
-void *runOutputCounterThread(); /* output counter thread runner */
+void *readerThread();        /* reader thread runner */
+void *writerThread();        /* writer thread runner */
+void *encryptionThread();    /* encryption thread runner */
+void *inputCounterThread();  /* input counter thread runner */
+void *outputCounterThread(); /* output counter thread runner */
 
 int main(int argc, char *argv[])
 {
@@ -88,22 +95,23 @@ int main(int argc, char *argv[])
     sem_init(&outFull, 0, 0);
     sem_init(&inMutex, 0, 1);
     sem_init(&outMutex, 0, 1);
+    sem_init(&reset_req_sem, 0, 1);
 
     // 5) create other threads
     printf("Creating READER thread...\n");
-    pthread_create(&reader, NULL, runReaderThread, NULL); // start the reader thread in the calling process
+    pthread_create(&reader, NULL, readerThread, NULL); // start the reader thread in the calling process
 
     printf("Creating INPUT COUNTER thread...\n");
-    pthread_create(&input_counter, NULL, runInputCounterThread, NULL); // start the input counter thread in the calling process
+    pthread_create(&input_counter, NULL, inputCounterThread, NULL); // start the input counter thread in the calling process
 
     printf("Creating ENCRYPTION thread...\n");
-    pthread_create(&encryption, NULL, runEncryptionThread, NULL); // start the encryption thread in the calling process
+    pthread_create(&encryption, NULL, encryptionThread, NULL); // start the encryption thread in the calling process
 
     printf("Creating OUTPUT COUNTER thread...\n");
-    pthread_create(&output_counter, NULL, runOutputCounterThread, NULL); // start the output counter thread in the calling process
+    pthread_create(&output_counter, NULL, outputCounterThread, NULL); // start the output counter thread in the calling process
 
     printf("Creating WRITER thread...\n");
-    pthread_create(&writer, NULL, runWriterThread, NULL); // start the writer thread in the calling process
+    pthread_create(&writer, NULL, writerThread, NULL); // start the writer thread in the calling process
 
     // 6) wait for all threads to complete
 
@@ -133,19 +141,21 @@ int main(int argc, char *argv[])
  * @return void*
  */
 
-void *runReaderThread()
+void *readerThread()
 {
     char c;
     reader_index = 0;
 
     while ((c = read_input()) != EOF)
     {
+        sem_wait(&reset_req_sem);
         sem_wait(&readEmpty);
         sem_wait(&inMutex);
         in_buf[reader_index] = c;
         sem_post(&inMutex);
         sem_post(&encryptFull);
         sem_post(&inFull);
+        sem_post(&reset_req_sem);
         reader_index = (reader_index + 1) % buffer_size;
     }
     sem_post(&inFull);
@@ -160,7 +170,7 @@ void *runReaderThread()
  * @return void*
  */
 
-void *runInputCounterThread()
+void *inputCounterThread()
 {
     int idx = 0;
 
@@ -186,7 +196,7 @@ void *runInputCounterThread()
  *
  * @return void*
  */
-void *runEncryptionThread()
+void *encryptionThread()
 {
     encrypt_index = 0;
     while (1)
@@ -219,7 +229,7 @@ void *runEncryptionThread()
  * @return void*
  */
 
-void *runOutputCounterThread()
+void *outputCounterThread()
 {
     int idx = 0;
 
@@ -246,7 +256,7 @@ void *runOutputCounterThread()
  * @return void*
  */
 
-void *runWriterThread()
+void *writerThread()
 {
     int idx = 0;
 
@@ -265,4 +275,32 @@ void *runWriterThread()
         }
     }
     return NULL;
+}
+
+/**
+ * function that takes and blocks the reader thread and counts the input and output logs
+ *
+ */
+
+void reset_requested()
+{
+    sem_wait(&reset_req_sem);
+    log_counts();
+}
+
+/**
+ * function responsible for checking if the input and output buffers are equal before letting the reader thread resume
+ *
+ */
+
+void reset_finished()
+{
+    while (1)
+    {
+        if (get_input_total_count() == get_output_total_count())
+        {
+            sem_post(&reset_req_sem);
+            break;
+        }
+    }
 }

@@ -126,11 +126,3 @@ int get_output_total_count()
 {
 	return output_total_count;
 }
-
-void reset_requested()
-{
-}
-
-void reset_finished()
-{
-}
