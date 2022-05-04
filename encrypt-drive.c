@@ -8,14 +8,14 @@
  * size which is used to create the input and output buffers which are in turn used to hold the characters as they are
  * being processesed by the varius threads. The code then initalizes several semaphores specified as follows
  *
- *      inMutex:        used to block threads from consuming the character in the input buffer the processes is working on
- *      outMutex:       used to block threads from consuming the character in the output buffer the processes is working on
- *      encryptFull:    used to block and signal the encryption thread that a new character has been placed in the input buffer
+ *      input_mutex:        used to block threads from consuming the character in the input buffer the processes is working on
+ *      output_mutex:       used to block threads from consuming the character in the output buffer the processes is working on
+ *      encrypt_full:    used to block and signal the encryption thread that a new character has been placed in the input buffer
  *      encryptEmpty:   used to block and signal the encryption thread that the output and writer threads have space for a new character
  *      readEmpty:      used to block and signal the reader thread that the input buffer has space for a new character
- *      writeFull:      used to block and signal the writer thread that the output buffer has a new character from the encryption thread
- *      inFull:         used to block and signal the input counter thread that the input buffer has a new character from the reader thread (solves cold start issue)
- *      outFull:        used to block and signal the output counter thread that the output buffer has a new character from the encryption thread
+ *      write_full:      used to block and signal the writer thread that the output buffer has a new character from the encryption thread
+ *      in_buffer_full:         used to block and signal the input counter thread that the input buffer has a new character from the reader thread (solves cold start issue)
+ *      out_full:        used to block and signal the output counter thread that the output buffer has a new character from the encryption thread
  *      reset_req_sem:  used to block the reader thread from executing until the input and output buffers are equal
  *
  * The code proceeds to create and execute the required five pthreads to work in conjunction waiting for each thread to rejoin, log counts and then destroy
@@ -38,14 +38,16 @@
 char *in_buf;
 char *out_buf;
 
-sem_t inMutex;
-sem_t outMutex;
-sem_t encryptFull;
-sem_t encryptEmpty;
-sem_t readEmpty;
-sem_t writeFull;
-sem_t inFull;
-sem_t outFull;
+sem_t input_mutex;
+sem_t output_mutex;
+sem_t encrypt_full;
+sem_t encrypt_empty_output;
+sem_t encrypt_empty_writer;
+sem_t read_empty_input;
+sem_t read_empty_encryption;
+sem_t write_full;
+sem_t in_buffer_full;
+sem_t out_full;
 sem_t reset_req_sem;
 
 int buffer_size;
@@ -83,18 +85,20 @@ int main(int argc, char *argv[])
         exit(2);
     }
 
-    in_buf = malloc(sizeof(char) * buffer_size + 1);
-    out_buf = malloc(sizeof(char) * buffer_size + 1);
+    in_buf = malloc(sizeof(char) * buffer_size);
+    out_buf = malloc(sizeof(char) * buffer_size);
 
     // 4) initalize shared variables
-    sem_init(&encryptFull, 0, 0);
-    sem_init(&encryptEmpty, 0, buffer_size);
-    sem_init(&readEmpty, 0, buffer_size);
-    sem_init(&writeFull, 0, 0);
-    sem_init(&inFull, 0, 0);
-    sem_init(&outFull, 0, 0);
-    sem_init(&inMutex, 0, 1);
-    sem_init(&outMutex, 0, 1);
+    sem_init(&encrypt_full, 0, 0);
+    sem_init(&encrypt_empty_output, 0, buffer_size);
+    sem_init(&encrypt_empty_writer, 0, buffer_size);
+    sem_init(&read_empty_input, 0, buffer_size);
+    sem_init(&read_empty_encryption, 0, buffer_size);
+    sem_init(&write_full, 0, 0);
+    sem_init(&in_buffer_full, 0, 0);
+    sem_init(&out_full, 0, 0);
+    sem_init(&input_mutex, 0, 1);
+    sem_init(&output_mutex, 0, 1);
     sem_init(&reset_req_sem, 0, 1);
 
     // 5) create other threads
@@ -124,14 +128,16 @@ int main(int argc, char *argv[])
     // 7) log character counts
     log_counts();
 
-    sem_destroy(&encryptFull);
-    sem_destroy(&encryptEmpty);
-    sem_destroy(&readEmpty);
-    sem_destroy(&writeFull);
-    sem_destroy(&inFull);
-    sem_destroy(&outFull);
-    sem_destroy(&inMutex);
-    sem_destroy(&outMutex);
+    sem_destroy(&encrypt_full);
+    sem_destroy(&encrypt_empty_output);
+    sem_destroy(&encrypt_empty_writer);
+    sem_destroy(&read_empty_input);
+    sem_destroy(&read_empty_encryption);
+    sem_destroy(&write_full);
+    sem_destroy(&in_buffer_full);
+    sem_destroy(&out_full);
+    sem_destroy(&input_mutex);
+    sem_destroy(&output_mutex);
 
     return 0;
 }
@@ -146,22 +152,20 @@ void *readerThread()
     char c;
     reader_index = 0;
 
-    while ((c = read_input()) != EOF)
+    do
     {
+        c = read_input();
         sem_wait(&reset_req_sem);
-        sem_wait(&readEmpty);
-        sem_wait(&inMutex);
+        sem_wait(&read_empty_input);
+        sem_wait(&read_empty_encryption);
+        sem_wait(&input_mutex);
         in_buf[reader_index] = c;
-        sem_post(&inMutex);
-        sem_post(&encryptFull);
-        sem_post(&inFull);
+        sem_post(&input_mutex);
+        sem_post(&encrypt_full);
+        sem_post(&in_buffer_full);
         sem_post(&reset_req_sem);
         reader_index = (reader_index + 1) % buffer_size;
-    }
-    sem_post(&inFull);
-    sem_post(&encryptFull);
-    reader_index = (reader_index + 1) % buffer_size;
-    in_buf[reader_index] = EOF;
+    }while (c != EOF);
     return NULL;
 }
 /**
@@ -176,17 +180,19 @@ void *inputCounterThread()
 
     while (1)
     {
-        sem_wait(&inFull);
-        sem_wait(&inMutex);
+        sem_wait(&in_buffer_full);
+        sem_wait(&input_mutex);
         char c = in_buf[idx];
-        count_input(c);
-        sem_post(&inMutex);
-        sem_post(&readEmpty);
-        idx = (idx + 1) % buffer_size;
         if (in_buf[idx] == EOF)
         {
+            sem_post(&read_empty_input);
+            sem_post(&input_mutex);
             break;
         }
+        count_input(c);
+        sem_post(&read_empty_input);
+        sem_post(&input_mutex);
+        idx = (idx + 1) % buffer_size;
     }
     return NULL;
 }
@@ -201,24 +207,30 @@ void *encryptionThread()
     encrypt_index = 0;
     while (1)
     {
-        sem_wait(&encryptFull);
-        sem_wait(&inMutex);
+        sem_wait(&encrypt_full);
+        sem_wait(&input_mutex);
         char c = in_buf[encrypt_index];
-        sem_post(&inMutex);
-        sem_post(&readEmpty);
-        c = encrypt(c);
-        sem_wait(&encryptEmpty);
-        sem_wait(&outMutex);
-        out_buf[encrypt_index] = c;
-        sem_post(&outMutex);
-        sem_post(&outFull);
-        sem_post(&writeFull);
-        encrypt_index = (encrypt_index + 1) % buffer_size;
         if (in_buf[encrypt_index] == EOF)
         {
             out_buf[encrypt_index] = EOF;
+            sem_post(&read_empty_encryption);
+            sem_post(&write_full);
+            sem_post(&out_full);
+            sem_post(&input_mutex);
+            sem_post(&output_mutex);
             break;
         }
+        c = encrypt(c);
+        sem_wait(&encrypt_empty_output);
+        sem_wait(&encrypt_empty_writer);
+        sem_wait(&output_mutex);
+        out_buf[encrypt_index] = c;
+        sem_post(&read_empty_encryption);
+        sem_post(&write_full);
+        sem_post(&out_full);
+        sem_post(&input_mutex);
+        sem_post(&output_mutex);
+        encrypt_index = (encrypt_index + 1) % buffer_size;
     }
     return NULL;
 }
@@ -235,17 +247,19 @@ void *outputCounterThread()
 
     while (1)
     {
-        sem_wait(&outFull);
-        sem_wait(&outMutex);
+        sem_wait(&out_full);
+        sem_wait(&output_mutex);
         char c = out_buf[idx];
-        count_output(c);
-        sem_post(&outMutex);
-        sem_post(&encryptEmpty);
-        idx = (idx + 1) % buffer_size;
         if (out_buf[idx] == EOF)
         {
+            sem_post(&encrypt_empty_output);
+            sem_post(&output_mutex);
             break;
         }
+        count_output(c);
+        sem_post(&encrypt_empty_output);
+        sem_post(&output_mutex);
+        idx = (idx + 1) % buffer_size;
     }
     return NULL;
 }
@@ -262,17 +276,20 @@ void *writerThread()
 
     while (1)
     {
-        sem_wait(&writeFull);
-        sem_wait(&outMutex);
+        sem_wait(&write_full);
+        sem_wait(&output_mutex);
         char c = out_buf[idx];
-        write_output(c);
-        sem_post(&outMutex);
-        sem_post(&encryptEmpty);
-        idx = (idx + 1) % buffer_size;
         if (out_buf[idx] == EOF)
         {
+            sem_post(&encrypt_empty_writer);
+            sem_post(&output_mutex);
+            sem_post(&output_mutex);
             break;
         }
+        write_output(c);
+        sem_post(&encrypt_empty_writer);
+        sem_post(&output_mutex);
+        idx = (idx + 1) % buffer_size;
     }
     return NULL;
 }
@@ -297,10 +314,10 @@ void reset_finished()
 {
     while (1)
     {
-        if (get_input_total_count() == get_output_total_count())
-        {
-            sem_post(&reset_req_sem);
-            break;
-        }
+        sem_wait(&encrypt_empty_output);
+        sem_wait(&encrypt_empty_writer);
+        sem_post(&reset_req_sem);
+        break;
+        
     }
 }
